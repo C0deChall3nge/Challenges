@@ -1,0 +1,378 @@
+Code Challenge: Train Ticket Booking API in Go
+Challenge Description
+
+You are given a Go application that implements a simple API for purchasing tickets, getting remaining seats for specific tickets, and searching tickets. The data is represented as sample data within the code, simulating what would be accessed in an external database.
+
+Recently, this API was deployed to production, and users have reported several issues with different endpoints:
+
+    The /purchase endpoint sometimes fails to complete a purchase or deduct the correct number of seats.
+    The /remaining-seats endpoint returns incorrect seat counts.
+    The /search endpoint returns incorrect or incomplete search results.
+
+Your task is to identify and fix the issues causing this behavior. You will do this by sending requests to the endpoints and debugging the responses and error messages you receive.
+Full Code
+
+go
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+)
+
+type Ticket struct {
+	ID        string  `json:"id"`
+	Train     string  `json:"train"`
+	From      string  `json:"from"`
+	To        string  `json:"to"`
+	Departure string  `json:"departure"`
+	Arrival   string  `json:"arrival"`
+	Price     float64 `json:"price"`
+	Seats     int     `json:"seats"`
+}
+
+var tickets = []Ticket{
+	{ID: "1", Train: "Express", From: "New York", To: "Boston", Departure: "09:00", Arrival: "12:00", Price: 99.99, Seats: 100},
+	{ID: "2", Train: "Regional", From: "Boston", To: "New York", Departure: "14:00", Arrival: "18:00", Price: 79.99, Seats: 150},
+	{ID: "3", Train: "Express", From: "Chicago", To: "New York", Departure: "07:00", Arrival: "15:00", Price: 129.99, Seats: 50},
+	{ID: "4", Train: "Coastal", From: "Los Angeles", To: "San Francisco", Departure: "08:00", Arrival: "12:00", Price: 89.99, Seats: 75},
+	{ID: "5", Train: "Regional", From: "San Francisco", To: "Los Angeles", Departure: "10:00", Arrival: "14:00", Price: 89.99, Seats: 120},
+}
+
+var mu sync.Mutex
+
+func main() {
+	http.HandleFunc("/purchase", purchaseHandler)
+	http.HandleFunc("/remaining-seats", remainingSeatsHandler)
+	http.HandleFunc("/search", searchHandler)
+
+	fmt.Println("Starting server at port 8080")
+	err := http.ListenAndServe(":8080", nil)
+	if err != nil {
+		fmt.Println("Error starting server:", err)
+	}
+}
+
+func purchaseHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		TicketID string `json:"ticket_id"`
+		Quantity int    `json:"quantity"`
+		Name     string `json:"name"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for i := range tickets {
+		if tickets[i].ID == request.TicketID {
+			if tickets[i].Seats < request.Quantity {
+				http.Error(w, "Not enough seats available", http.StatusConflict)
+				return
+			}
+			startingSeats := tickets[i].Seats
+			tickets[i].Seats = tickets[i].Seats - request.Quantity // Bug: Incorrectly updated seats
+			response := fmt.Sprintf("Ticket purchased successfully for %s. Starting seats: %d, Remaining seats: %d, Purchased: %d", request.Name, startingSeats, tickets[i].Seats, request.Quantity)
+			err := json.NewEncoder(w).Encode(response)
+			if err != nil {
+				http.Error(w, "Error encoding response", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
+	http.Error(w, "Ticket not found", http.StatusNotFound)
+}
+
+func remainingSeatsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ticketID := r.URL.Query().Get("ticket_id")
+	if ticketID == "" {
+		http.Error(w, "Missing ticket_id parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Bug: Incorrect ticket ID matching logic
+	for _, ticket := range tickets {
+		if strings.Contains(ticket.ID, ticketID) {
+			response := struct {
+				ID    string `json:"id"`
+				Seats int    `json:"seats"`
+			}{
+				ID:    ticket.ID,
+				Seats: ticket.Seats,
+			}
+			err := json.NewEncoder(w).Encode(response)
+			if err != nil {
+				http.Error(w, "Error encoding response", http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
+	http.Error(w, "Ticket not found", http.StatusNotFound)
+}
+
+func searchHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+		Date string `json:"date"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	var filteredTickets []Ticket
+	for _, ticket := range tickets {
+		if (strings.EqualFold(ticket.From, request.From) || request.From == "") &&
+			(strings.EqualFold(ticket.To, request.To) || request.To == "") {
+			filteredTickets = append(filteredTickets, ticket)
+		}
+	}
+
+	if len(filteredTickets) == 0 {
+		http.Error(w, "No tickets found", http.StatusNotFound)
+		return
+	}
+
+	err = json.NewEncoder(w).Encode(filteredTickets)
+	if err != nil {
+		http.Error(w, "Error encoding response", http.StatusInternalServerError)
+	}
+}
+
+Example Requests to Trigger Errors
+1. /purchase Endpoint
+
+Send a POST request to purchase a ticket:
+
+sh
+
+curl -X POST http://localhost:8080/purchase -H "Content-Type: application/json" -d '{"ticket_id": "1", "quantity": 10, "name": "John Doe"}'
+
+Expected Response:
+
+json
+
+{
+    "message": "Ticket purchased successfully for John Doe. Starting seats: 100, Remaining seats: 90, Purchased: 10"
+}
+
+    Issue: The purchase might not deduct the correct number of seats due to incorrect seat deduction logic.
+    Debugging Steps:
+        Verify the seat deduction logic, especially where the ticket seats are updated.
+        Check if the seat count is properly decremented.
+
+2. /remaining-seats Endpoint
+
+Send a GET request to retrieve remaining seats for a specific ticket:
+
+sh
+
+curl -X GET "http://localhost:8080/remaining-seats?ticket_id=1"
+
+Expected Response:
+
+json
+
+{
+    "id": "1",
+    "seats": 90
+}
+
+    Issue: The remaining seats might be incorrect due to incorrect ticket ID matching logic.
+    Debugging Steps:
+        Verify the ticket ID matching logic in the remainingSeatsHandler.
+        Ensure the correct ticket ID is used to find the remaining seats.
+
+3. /search Endpoint
+
+Send a POST request to search for tickets:
+
+sh
+
+curl -X POST http://localhost:8080/search -H "Content-Type: application/json" -d '{"from": "New York", "to": "Boston", "date": "2024-08-01"}'
+
+Expected Response:
+
+json
+
+[
+    {
+        "id": "1",
+        "train": "Express",
+        "from": "New York",
+        "to": "Boston",
+        "departure": "09:00",
+        "arrival": "12:00",
+        "price": 99.99,
+        "seats": 90
+    }
+]
+
+    Issue: The search might return incomplete or incorrect results due to filtering logic bugs.
+    Debugging Steps:
+        Verify the filtering logic to ensure it accurately matches the From and To fields.
+        Ensure the request payload is correctly parsed and used in the search criteria.
+
+Summary of Changes
+
+    Endpoint Functionality:
+        Bug: The /purchase endpoint sometimes fails to complete a purchase or deduct the correct number of seats.
+        Fix: Ensure proper logic to deduct seats correctly and update the actual "fake DB" values instead of a local loop variable.
+
+Code Changes:
+
+diff
+
+func purchaseHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var request struct {
+        TicketID string `json:"ticket_id"`
+        Quantity int    `json:"quantity"`
+        Name     string `json:"name"`
+    }
+    err := json.NewDecoder(r.Body).Decode(&request)
+    if err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    mu.Lock()
+    defer mu.Unlock()
+
+    for i := range tickets {
+        if tickets[i].ID == request.TicketID {
+            if tickets[i].Seats < request.Quantity {
+                http.Error(w, "Not enough seats available", http.StatusConflict)
+                return
+            }
+            startingSeats := tickets[i].Seats
+-           tickets[i].Seats = tickets[i].Seats - request.Quantity
++           tickets[i].Seats -= request.Quantity
+            response := fmt.Sprintf("Ticket purchased successfully for %s. Starting seats: %d, Remaining seats: %d, Purchased: %d", request.Name, startingSeats, tickets[i].Seats, request.Quantity)
+            err := json.NewEncoder(w).Encode(response)
+            if err != nil {
+                http.Error(w, "Error encoding response", http.StatusInternalServerError)
+            }
+            return
+        }
+    }
+
+    http.Error(w, "Ticket not found", http.StatusNotFound)
+}
+
+    Bug: The /remaining-seats endpoint returns incorrect seat counts due to incorrect ticket ID matching logic.
+    Fix: Ensure correct ticket ID matching logic.
+
+Code Changes:
+
+diff
+
+func remainingSeatsHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodGet {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+
+    ticketID := r.URL.Query().Get("ticket_id")
+    if ticketID == "" {
+        http.Error(w, "Missing ticket_id parameter", http.StatusBadRequest)
+        return
+    }
+
+    for _, ticket := range tickets {
+-       if strings.Contains(ticket.ID, ticketID) {
++       if ticket.ID == ticketID {
+            response := struct {
+                ID    string `json:"id"`
+                Seats int    `json:"seats"`
+            }{
+                ID:    ticket.ID,
+                Seats: ticket.Seats,
+            }
+            err := json.NewEncoder(w).Encode(response)
+            if err != nil {
+                http.Error(w, "Error encoding response", http.StatusInternalServerError)
+            }
+            return
+        }
+    }
+
+    http.Error(w, "Ticket not found", http.StatusNotFound)
+}
+
+    Bug: The /search endpoint returns incorrect or incomplete search results due to filtering logic bugs.
+    Fix: Correct the filtering logic to accurately match the From and To fields and ensure the request payload is correctly parsed.
+
+Code Changes:
+
+diff
+
+func searchHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+        return
+    }
+
+    var request struct {
+        From string `json:"from"`
+        To   string `json:"to"`
+        Date string `json:"date"`
+    }
+    err := json.NewDecoder(r.Body).Decode(&request)
+    if err != nil {
+        http.Error(w, "Invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    var filteredTickets []Ticket
+    for _, ticket := range tickets {
+-       if strings.EqualFold(ticket.From, request.From) && strings.EqualFold(ticket.To, request.To) {
++       if (strings.EqualFold(ticket.From, request.From) || request.From == "") &&
++           (strings.EqualFold(ticket.To, request.To) || request.To == "") {
+            filteredTickets = append(filteredTickets, ticket)
+        }
+    }
+
+    if len(filteredTickets) == 0 {
+        http.Error(w, "No tickets found", http.StatusNotFound)
+        return
+    }
+
+    err = json.NewEncoder(w).Encode(filteredTickets)
+    if err != nil {
+        http.Error(w, "Error encoding response", http.StatusInternalServerError)
+    }
+}
+
+These changes ensure that the API endpoints work correctly, returning the correct data and handling errors properly.
